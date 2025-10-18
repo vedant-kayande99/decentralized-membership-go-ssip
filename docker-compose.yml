@@ -1,0 +1,8 @@
+services:
+  node1:
+    build: .
+    command: -addr "node1:8080"
+
+  node2:
+    build: .
+    command: -addr "node2:8080" -peer "node1:8080"

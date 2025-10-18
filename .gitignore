@@ -1,0 +1,14 @@
+# Output directories
+bin/
+dist/
+
+# IDE specific files
+.vscode/
+.DS_Store
+
+# Environment files
+.env
+.env.local
+
+# Log files
+*.log
