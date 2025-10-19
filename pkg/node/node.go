@@ -1,16 +1,17 @@
 package node
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
-	"time"
 )
 
 type Node struct {
-	addr *net.UDPAddr
+	addr string
 	conn *net.UDPConn
-	shutdown chan struct{}
+	memberList *MemberList
+	running bool	
 }
 
 func NewNode(address string) (*Node, error) {
@@ -25,49 +26,105 @@ func NewNode(address string) (*Node, error) {
 	}
 
 	return &Node{
-		addr: addr,
+		addr: address,
 		conn: conn,
-		shutdown: make(chan struct{}),
+		memberList: NewMemberList(address),
+		running: false,		
 	}, nil
 }
 
-func (node *Node) Start() {
-	go node.listen()
+func (n *Node) Start() {
+	n.running = true
+	go n.listen()
 }
 
-func (node *Node) Stop() {
-	close(node.shutdown)
-	node.conn.Close()
+func (n *Node) Stop() {	
+	n.running = false
+	n.conn.Close()
 }
 
-func (node *Node) listen() {
+func (n *Node) GetMemberList() *MemberList{
+	return n.memberList
+}
+
+func (n *Node) listen() {
 	buffer := make([]byte, 1024)
-	for {
-		select {
-		case <- node.shutdown:
-			return
-		default:
-			node.conn.SetReadDeadline(time.Now().Add(1*time.Second))
-			len, remoteAddr, err := node.conn.ReadFromUDP(buffer)
-			if err != nil {
-				if !err.(net.Error).Timeout() {
-					log.Printf("[ERROR] Failed to read from UDP: %v", err)
-				}
-				continue
-			}			
-			message := string(buffer[:len])
-			log.Printf("Received message from %v: %s", remoteAddr, message)
-		}		
+	for n.running {
+		numBytes, _, err := n.conn.ReadFromUDP(buffer)
+		if err != nil {
+			if n.running {
+				log.Printf("[ERROR] Failed to read UDP message: %v", err)
+			}
+			continue
+		}
+		log.Printf("[INFO] New message received")
+		go n.handleMessage(buffer[:numBytes])
 	}
 }
 
-func (node *Node) SendMessage(targetAddr string, message string) error {
+func (n *Node) handleMessage(data []byte) {
+	msg, err := DeserializeMessage(data)
+	if err != nil {
+		log.Printf("[ERROR] Failed to deserialize message: %v", err)
+		return		
+	}
+	log.Printf("Message Received from: %s with message type: %v", msg.SenderAddr, msg.Type)
+	log.Printf("Membership List: %v",n.memberList.members)
+
+	switch msg.Type {
+	case JoinMsg:
+		n.handleJoin(msg)
+	case JoinAckMsg:
+		n.handleJoinAck(msg)
+	case HeartbeatMsg:
+		n.handleHeartbeat(msg)
+	default:
+		log.Printf("[WARN] Unknown message type: %v", msg.Type)
+	}
+}
+
+func (n *Node) handleJoin(msg *Message) {
+	// add the new node to the member list
+	n.memberList.Add(msg.SenderAddr)
+
+	// send back a JoinAck message with the complete updated member list
+	members := n.memberList.GetMembers()
+	membersBytes, err := json.Marshal(members)
+	if err != nil {
+		log.Printf("[ERROR] Failed to marshal/serialize member list: %v", err)
+		return
+	}
+	
+	ackMsg := NewMessage(JoinAckMsg, n.addr, membersBytes)
+	n.SendMessage(msg.SenderAddr, ackMsg)
+}
+
+func (n *Node) handleJoinAck(msg *Message) {
+	var members []Member
+	if err := json.Unmarshal(msg.Payload, &members); err != nil {
+		log.Printf("[ERROR] Failed to deserialize message payload in JoinAck message: %v", err)
+		return
+	}
+		
+	n.memberList.SyncMembers(members)
+}
+
+func (n *Node) handleHeartbeat(msg *Message) {
+	n.memberList.UpdateStatus(msg.SenderAddr, Alive)
+}
+
+func (n *Node) SendMessage(targetAddr string, message *Message) error {
 	addr, err := net.ResolveUDPAddr("udp", targetAddr)
 	if err != nil {
 		return fmt.Errorf("[ERROR] Failed to resolve target address: %v", err)
 	}
 
-	_, err = node.conn.WriteToUDP([]byte(message), addr)
+	data, err := message.Serialize()
+	if err != nil {
+		return err
+	}
+
+	_, err = n.conn.WriteToUDP(data, addr)
 	if err != nil {
 		return fmt.Errorf("[ERROR] Failed to send message: %v", err)
 	}

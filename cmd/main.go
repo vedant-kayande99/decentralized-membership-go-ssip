@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,7 +15,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "Address to listen on")
-	peer := flag.String("peer", "", "Address of peer to send messages to")
+	peer := flag.String("peer", "", "Address of peer to join cluster")
 	flag.Parse()
 
 	n, err := node.NewNode(*addr)
@@ -24,23 +25,41 @@ func main() {
 
 	n.Start()
 	defer n.Stop()
-
+	
 	done := make(chan struct{})
-	if *peer != "" {
-		go func() {
-			ticker := time.NewTicker(2*time.Second)
-			for {
-				select {
-				case <-ticker.C:
-					err := n.SendMessage(*peer, "Hello from "+*addr)
-					if err != nil {
-						log.Printf("[ERROR] Failed to send message: %v", err)
+	go func() {
+		ticker := time.NewTicker(1*time.Second)
+		defer ticker.Stop()		
+		randSource := rand.NewSource(time.Now().UnixNano())
+		randVal := rand.New(randSource)
+		for {
+			select {
+			case <-ticker.C:
+				members := n.GetMemberList().GetMembers()
+				numMembers := len(members)
+				if numMembers <= 0 {
+					continue
+				}				
+				randIdx := randVal.Intn(numMembers)
+				memberAddr := members[randIdx].Addr
+				if memberAddr != *addr {
+					msg := node.NewMessage(node.HeartbeatMsg, *addr, nil)
+					if err := n.SendMessage(memberAddr, msg); err != nil {
+						log.Printf("[ERROR] Failed to send heartbeat to %s: %v",memberAddr, err)
 					}
-				case <-done:
-					return
-				}			
+				}
+			case <-done:
+				return				
 			}
-		}()
+		}
+	}()
+	
+	// join cluster if peer is specified
+	if *peer != "" {
+		joinMsg := node.NewMessage(node.JoinMsg, *addr, nil)
+		if err := n.SendMessage(*peer, joinMsg); err != nil {
+			log.Printf("[ERROR] Failed to send join message: %v", err)
+		}
 	}
 
 	sigChan := make(chan os.Signal, 1)
