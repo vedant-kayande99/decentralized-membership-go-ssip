@@ -5,7 +5,6 @@ import (
 	"log"
 	"math/rand"
 	"sync"
-	"time"
 )
 
 var ErrNoPeers = errors.New("[ERROR] No peers in the member list")
@@ -20,8 +19,8 @@ const (
 
 type Member struct {
 	Addr string
-	Status MemberStatus
-	LastSeen time.Time
+	Status MemberStatus	
+	HeartbeatCounter int
 }
 
 type MemberList struct {
@@ -29,18 +28,21 @@ type MemberList struct {
 	mutex sync.RWMutex
 	selfAddr string
 	peers []string //members map keys list for O(1) random access
+	vectorClock map[string]int
 }
 
 func NewMemberList(selfAddr string) *MemberList {
+	selfMember := self(selfAddr)
 	return &MemberList{
-		members: map[string]*Member{selfAddr: self(selfAddr)},		
+		members: map[string]*Member{selfAddr: selfMember},		
 		selfAddr: selfAddr,
 		peers: make([]string, 0),
+		vectorClock: map[string]int{selfAddr: selfMember.HeartbeatCounter},
 	}
 }
 
 func self(selfAddr string) *Member {
-	return &Member{Addr: selfAddr, Status: Alive, LastSeen: time.Now()}
+	return &Member{Addr: selfAddr, Status: Alive, HeartbeatCounter: 0}
 }
 
 func (ml *MemberList) Add(member *Member) {
@@ -53,9 +55,10 @@ func (ml *MemberList) Add(member *Member) {
 			ml.peers = append(ml.peers, member.Addr)
 		}
 	} else {
-		ml.members[member.Addr].Status = member.Status
-		ml.members[member.Addr].LastSeen = member.LastSeen
+		ml.members[member.Addr].Status = member.Status		
+		ml.members[member.Addr].HeartbeatCounter = member.HeartbeatCounter
 	}
+	ml.vectorClock[member.Addr] = member.HeartbeatCounter
 }
 
 func (ml *MemberList) Remove(addr string) {
@@ -65,6 +68,7 @@ func (ml *MemberList) Remove(addr string) {
 		return
 	}	
 	delete(ml.members, addr)
+	delete(ml.vectorClock, addr)
 
 	for i, peerAddr := range ml.peers {
 		if peerAddr == addr {
@@ -85,8 +89,12 @@ func (ml *MemberList) Merge(receivedMembers []Member) {
 		existingMem, exists := ml.members[member.Addr]
 		ml.mutex.RUnlock()
 
-		if !exists || member.LastSeen.After(existingMem.LastSeen) {
+		if !exists || member.HeartbeatCounter > existingMem.HeartbeatCounter {
 			ml.Add(&member)
+		} else if exists && member.HeartbeatCounter == existingMem.HeartbeatCounter {
+			if member.Status > existingMem.Status {
+				ml.UpdateStatus(member.Addr, member.Status)
+			}
 		}
 	}
 }
@@ -141,7 +149,16 @@ func (ml *MemberList) UpdateStatus(addr string, status MemberStatus) {
 	defer ml.mutex.Unlock()
 
 	if member, exists := ml.members[addr]; exists {
-		member.Status = status
-		member.LastSeen = time.Now()
+		member.Status = status		
+	}
+}
+
+func (ml *MemberList) IncrementHeartbeat() {
+	ml.mutex.Lock()
+	defer ml.mutex.Unlock()
+
+	if self, ok := ml.members[ml.selfAddr]; ok {
+		self.HeartbeatCounter += 1		
+		ml.vectorClock[ml.selfAddr] = self.HeartbeatCounter
 	}
 }

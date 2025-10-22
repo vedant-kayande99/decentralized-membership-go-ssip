@@ -111,6 +111,7 @@ func (n *Node) gossipLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			n.memberList.IncrementHeartbeat()
 			peer, err := n.memberList.GetRandomPeer()
 			if err != nil {
 				continue
@@ -152,7 +153,7 @@ func (n *Node) handleMessage(msg *Message) {
 func (n *Node) handleJoin(msg *Message) {
 	log.Printf("[INFO] Received Join request from %s", msg.SenderAddr)
 	// add the new node to the member list
-	member := &Member{Addr: msg.SenderAddr, LastSeen: time.Now(), Status: Alive}
+	member := &Member{Addr: msg.SenderAddr, Status: Alive, HeartbeatCounter: 0}
 	n.memberList.Add(member)
 
 	// send back a JoinAck message with the complete updated member list
