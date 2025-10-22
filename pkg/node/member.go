@@ -1,9 +1,14 @@
 package node
 
 import (
+	"errors"
+	"log"
+	"math/rand"
 	"sync"
 	"time"
 )
+
+var ErrNoPeers = errors.New("[ERROR] No peers in the member list")
 
 type MemberStatus int
 
@@ -23,12 +28,14 @@ type MemberList struct {
 	members map[string]*Member
 	mutex sync.RWMutex
 	selfAddr string
+	peers []string //members map keys list for O(1) random access
 }
 
 func NewMemberList(selfAddr string) *MemberList {
 	return &MemberList{
 		members: map[string]*Member{selfAddr: self(selfAddr)},		
 		selfAddr: selfAddr,
+		peers: make([]string, 0),
 	}
 }
 
@@ -36,60 +43,69 @@ func self(selfAddr string) *Member {
 	return &Member{Addr: selfAddr, Status: Alive, LastSeen: time.Now()}
 }
 
-func (ml *MemberList) Add(addr string) {
+func (ml *MemberList) Add(member *Member) {
 	ml.mutex.Lock()
 	defer ml.mutex.Unlock()
 
-	if _, exists := ml.members[addr]; !exists {
-		ml.members[addr] = &Member{
-			Addr: addr,
-			Status: Alive,
-			LastSeen: time.Now(),
+	if _, exists := ml.members[member.Addr]; !exists {
+		ml.members[member.Addr] = member
+		if ml.selfAddr != member.Addr {
+			ml.peers = append(ml.peers, member.Addr)
 		}
+	} else {
+		ml.members[member.Addr].Status = member.Status
+		ml.members[member.Addr].LastSeen = member.LastSeen
 	}
 }
 
 func (ml *MemberList) Remove(addr string) {
 	ml.mutex.Lock()
 	defer ml.mutex.Unlock()
-
+	if _, exists := ml.members[addr]; !exists {		
+		return
+	}	
 	delete(ml.members, addr)
+
+	for i, peerAddr := range ml.peers {
+		if peerAddr == addr {
+			ml.peers = append(ml.peers[:i], ml.peers[i+1:]...)
+			break
+		}
+	}
+}
+
+func (ml *MemberList) Merge(receivedMembers []Member) {
+	log.Printf("[INFO] Current Membership List of node %s: %v", ml.selfAddr, ml.members)
+	for _, member := range receivedMembers {
+		if member.Addr == ml.selfAddr {
+			continue
+		}
+
+		ml.mutex.RLock()
+		existingMem, exists := ml.members[member.Addr]
+		ml.mutex.RUnlock()
+
+		if !exists || member.LastSeen.After(existingMem.LastSeen) {
+			ml.Add(&member)
+		}
+	}
 }
 
 func (ml *MemberList) SyncMembers(receivedMembers []Member) {
-	ml.mutex.Lock()
-	defer ml.mutex.Unlock()
-
-	receivedMap := make(map[string]Member)
-	for _, m := range receivedMembers {
-		receivedMap[m.Addr] = m
+	receivedSet := make(map[string]struct{})
+	for _, member := range receivedMembers{
+		receivedSet[member.Addr] = struct{}{}
+		ml.Add(&member)
 	}
 
-	// update or add members from received list
-	for addr, receivedMember := range receivedMap {
-		if existingMember, exists := ml.members[addr]; exists {
-			if receivedMember.LastSeen.After(existingMember.LastSeen) {
-				ml.members[addr] = &Member{
-					Addr: receivedMember.Addr,
-					Status: receivedMember.Status,
-					LastSeen: receivedMember.LastSeen,
-				}
-			}
-		} else {
-			ml.members[addr] = &Member{
-					Addr: receivedMember.Addr,
-					Status: receivedMember.Status,
-					LastSeen: receivedMember.LastSeen,
-				}
+	currentMembers := ml.GetMembers()
+	for _, member := range currentMembers {
+		if member.Addr == ml.selfAddr {
+			continue
 		}
-	}
 
-	// mark members as dead if not in received list
-	for addr, member := range ml.members {
-		if _, exists := receivedMap[addr]; !exists {
-			if addr != ml.selfAddr {
-				member.Status = Dead
-			}
+		if _, exists := receivedSet[member.Addr]; !exists {
+			ml.Remove(member.Addr)
 		}
 	}
 }
@@ -104,6 +120,20 @@ func (ml *MemberList) GetMembers() []Member {
 	}
 
 	return members
+}
+
+func (ml *MemberList) GetRandomPeer() (*Member, error) {
+	ml.mutex.RLock()
+	defer ml.mutex.RUnlock()
+
+	if len(ml.peers) == 0 {
+		return nil, ErrNoPeers
+	}
+
+	randIdx := rand.Intn(len(ml.peers))
+	peerAddr := ml.peers[randIdx]
+
+	return ml.members[peerAddr], nil
 }
 
 func (ml *MemberList) UpdateStatus(addr string, status MemberStatus) {

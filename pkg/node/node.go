@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
+	"time"
 )
 
 type Node struct {
 	addr string
 	conn *net.UDPConn
 	memberList *MemberList
-	running bool	
+	shutdown chan struct{}
+	wg sync.WaitGroup	
 }
 
 func NewNode(address string) (*Node, error) {
@@ -29,18 +32,23 @@ func NewNode(address string) (*Node, error) {
 		addr: address,
 		conn: conn,
 		memberList: NewMemberList(address),
-		running: false,		
+		shutdown: make(chan struct{}),
 	}, nil
 }
 
 func (n *Node) Start() {
-	n.running = true
+	n.wg.Add(3)
 	go n.listen()
+	go n.heartBeatLoop()
+	go n.gossipLoop()
+	log.Printf("Node started at %s", n.addr)
 }
 
-func (n *Node) Stop() {	
-	n.running = false
+func (n *Node) Stop() {
+	close(n.shutdown)
 	n.conn.Close()
+	n.wg.Wait()
+	log.Printf("Node %s stopped.", n.addr)		
 }
 
 func (n *Node) GetMemberList() *MemberList{
@@ -48,28 +56,84 @@ func (n *Node) GetMemberList() *MemberList{
 }
 
 func (n *Node) listen() {
+	defer n.wg.Done()
 	buffer := make([]byte, 1024)
-	for n.running {
+	for {
 		numBytes, _, err := n.conn.ReadFromUDP(buffer)
 		if err != nil {
-			if n.running {
-				log.Printf("[ERROR] Failed to read UDP message: %v", err)
+			select {
+			case <-n.shutdown:
+				return
+			default:
+				log.Printf("[ERROR] Failed to read from UDP: %v", err)
 			}
 			continue
 		}
+		var msg Message
+		if err := json.Unmarshal(buffer[:numBytes], &msg); err != nil {
+			log.Printf("[ERROR] Failed to deserialize message: %v", err)
+			continue
+		}
+
 		log.Printf("[INFO] New message received")
-		go n.handleMessage(buffer[:numBytes])
+		go n.handleMessage(&msg)
 	}
 }
 
-func (n *Node) handleMessage(data []byte) {
-	msg, err := DeserializeMessage(data)
-	if err != nil {
-		log.Printf("[ERROR] Failed to deserialize message: %v", err)
-		return		
+func (n *Node) heartBeatLoop() {
+	defer n.wg.Done()
+	ticker := time.NewTicker(1*time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			peer, err := n.memberList.GetRandomPeer()
+			if err != nil {
+				continue
+			}
+
+			msg := NewMessage(HeartbeatMsg, n.addr, nil)
+			if err := n.SendMessage(peer.Addr, msg); err != nil {
+				log.Printf("[ERROR] Failed to send heartbeat to %s: %v", peer.Addr, err)
+			}
+		case <-n.shutdown:
+			return
+		}
 	}
+}
+
+func (n *Node) gossipLoop() {
+	defer n.wg.Done()
+	ticker := time.NewTicker(2*time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			peer, err := n.memberList.GetRandomPeer()
+			if err != nil {
+				continue
+			}
+
+			members := n.memberList.GetMembers()
+			membersBytes, err := json.Marshal(members)
+			if err != nil {
+				log.Printf("[ERROR] Failed to encode memebers list for gossip: %v", err)
+			}
+			
+			msg := NewMessage(GossipMsg, n.addr, membersBytes)
+			if err := n.SendMessage(peer.Addr, msg); err != nil {
+				log.Printf("[ERROR] Failed to send gossip message to %s from %s: %v", peer.Addr, n.addr, err)
+			}
+		case <-n.shutdown:
+			return
+		}
+	}
+}
+
+func (n *Node) handleMessage(msg *Message) {
 	log.Printf("Message Received from: %s with message type: %v", msg.SenderAddr, msg.Type)
-	log.Printf("Membership List: %v",n.memberList.members)
 
 	switch msg.Type {
 	case JoinMsg:
@@ -78,28 +142,36 @@ func (n *Node) handleMessage(data []byte) {
 		n.handleJoinAck(msg)
 	case HeartbeatMsg:
 		n.handleHeartbeat(msg)
+	case GossipMsg:
+		n.handleGossip(msg)
 	default:
 		log.Printf("[WARN] Unknown message type: %v", msg.Type)
 	}
 }
 
 func (n *Node) handleJoin(msg *Message) {
+	log.Printf("[INFO] Received Join request from %s", msg.SenderAddr)
 	// add the new node to the member list
-	n.memberList.Add(msg.SenderAddr)
+	member := &Member{Addr: msg.SenderAddr, LastSeen: time.Now(), Status: Alive}
+	n.memberList.Add(member)
 
 	// send back a JoinAck message with the complete updated member list
 	members := n.memberList.GetMembers()
 	membersBytes, err := json.Marshal(members)
 	if err != nil {
-		log.Printf("[ERROR] Failed to marshal/serialize member list: %v", err)
+		log.Printf("[ERROR] Failed to marshal/serialize member list for JoinAck: %v", err)
 		return
 	}
 	
 	ackMsg := NewMessage(JoinAckMsg, n.addr, membersBytes)
-	n.SendMessage(msg.SenderAddr, ackMsg)
+	if err := n.SendMessage(msg.SenderAddr, ackMsg); err != nil {
+		log.Printf("[ERROR] Failed to send JoinAck message to %s: %v", msg.SenderAddr, err)
+	}
 }
 
 func (n *Node) handleJoinAck(msg *Message) {
+	log.Printf("[INFO] Received JoinAck request from %s", msg.SenderAddr)
+
 	var members []Member
 	if err := json.Unmarshal(msg.Payload, &members); err != nil {
 		log.Printf("[ERROR] Failed to deserialize message payload in JoinAck message: %v", err)
@@ -107,6 +179,16 @@ func (n *Node) handleJoinAck(msg *Message) {
 	}
 		
 	n.memberList.SyncMembers(members)
+}
+
+func (n *Node) handleGossip(msg *Message) {	
+	var receivedMembers []Member
+	if err := json.Unmarshal(msg.Payload, &receivedMembers); err != nil {
+		log.Printf("[ERROR] Failed to deserialize gossip message with membership list from %s: %v", msg.SenderAddr, err)
+		return
+	}
+
+	n.memberList.Merge(receivedMembers)
 }
 
 func (n *Node) handleHeartbeat(msg *Message) {

@@ -11,6 +11,7 @@ const (
 	JoinMsg MessageType = iota
 	JoinAckMsg
 	HeartbeatMsg
+	GossipMsg
 )
 
 type Message struct {
