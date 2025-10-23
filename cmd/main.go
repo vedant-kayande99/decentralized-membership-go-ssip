@@ -26,7 +26,7 @@ func main() {
 	
 	// join cluster if peer is specified
 	if *peer != "" {
-		joinMsg := node.NewMessage(node.JoinMsg, *addr, nil)
+		joinMsg := node.NewMessage(node.JoinMsg, *addr, nil, nil)
 		if err := n.SendMessage(*peer, joinMsg); err != nil {
 			log.Printf("[ERROR] Failed to send join message: %v", err)
 		}

@@ -15,18 +15,20 @@ const (
 )
 
 type Message struct {
-	Type MessageType	`json:"type"`
-	SenderAddr string	`json:"sender_addr"`
-	Timestamp time.Time	`json:"timestamp"`
-	Payload []byte		`json:"payload"`
+	Type MessageType			`json:"type"`
+	SenderAddr string			`json:"sender_addr"`
+	Timestamp time.Time			`json:"timestamp"`
+	Payload []byte				`json:"payload"`
+	VectorClock map[string]int	`json:"vector_clock"`
 }
 
-func NewMessage(msgType MessageType, senderAddr string, payload []byte) *Message {
+func NewMessage(msgType MessageType, senderAddr string, payload []byte, clock map[string]int) *Message {
 	return &Message{
 		Type: msgType,
 		SenderAddr: senderAddr,
 		Timestamp: time.Now(),
 		Payload: payload,
+		VectorClock: clock,
 	}
 }
 

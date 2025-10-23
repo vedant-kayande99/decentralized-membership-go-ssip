@@ -37,9 +37,9 @@ func NewNode(address string) (*Node, error) {
 }
 
 func (n *Node) Start() {
-	n.wg.Add(3)
+	n.wg.Add(2)
 	go n.listen()
-	go n.heartBeatLoop()
+	// go n.heartBeatLoop()
 	go n.gossipLoop()
 	log.Printf("Node started at %s", n.addr)
 }
@@ -74,8 +74,7 @@ func (n *Node) listen() {
 			log.Printf("[ERROR] Failed to deserialize message: %v", err)
 			continue
 		}
-
-		log.Printf("[INFO] New message received")
+		
 		go n.handleMessage(&msg)
 	}
 }
@@ -93,7 +92,7 @@ func (n *Node) heartBeatLoop() {
 				continue
 			}
 
-			msg := NewMessage(HeartbeatMsg, n.addr, nil)
+			msg := NewMessage(HeartbeatMsg, n.addr, nil, nil)
 			if err := n.SendMessage(peer.Addr, msg); err != nil {
 				log.Printf("[ERROR] Failed to send heartbeat to %s: %v", peer.Addr, err)
 			}
@@ -105,7 +104,7 @@ func (n *Node) heartBeatLoop() {
 
 func (n *Node) gossipLoop() {
 	defer n.wg.Done()
-	ticker := time.NewTicker(2*time.Second)
+	ticker := time.NewTicker(5*time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -123,7 +122,8 @@ func (n *Node) gossipLoop() {
 				log.Printf("[ERROR] Failed to encode memebers list for gossip: %v", err)
 			}
 			
-			msg := NewMessage(GossipMsg, n.addr, membersBytes)
+			clock := n.memberList.GetVectorClock()
+			msg := NewMessage(GossipMsg, n.addr, membersBytes, clock)
 			if err := n.SendMessage(peer.Addr, msg); err != nil {
 				log.Printf("[ERROR] Failed to send gossip message to %s from %s: %v", peer.Addr, n.addr, err)
 			}
@@ -164,7 +164,7 @@ func (n *Node) handleJoin(msg *Message) {
 		return
 	}
 	
-	ackMsg := NewMessage(JoinAckMsg, n.addr, membersBytes)
+	ackMsg := NewMessage(JoinAckMsg, n.addr, membersBytes, n.memberList.GetVectorClock())
 	if err := n.SendMessage(msg.SenderAddr, ackMsg); err != nil {
 		log.Printf("[ERROR] Failed to send JoinAck message to %s: %v", msg.SenderAddr, err)
 	}
@@ -189,7 +189,25 @@ func (n *Node) handleGossip(msg *Message) {
 		return
 	}
 
+	// merge incomming gossip
 	n.memberList.Merge(receivedMembers)
+
+	// check if there is new info to send back
+	delta := n.memberList.GetDelta(msg.VectorClock)
+	if len(delta) > 0 {
+		log.Printf("[INFO] Sending back a delta of size %d to %s", len(delta), msg.SenderAddr)
+		deltaBytes, err := json.Marshal(delta)
+		if err != nil {
+			log.Printf("[ERROR] Failed to serialize/marshal delta info for gossip response: %v", err)
+			return
+		}
+
+		responseClock := n.memberList.GetVectorClock()
+		responseMsg := NewMessage(GossipMsg, n.addr, deltaBytes, responseClock)
+		if err := n.SendMessage(msg.SenderAddr, responseMsg); err != nil {
+			log.Printf("[ERROR] Failed to send gossip delta to %s: %v", msg.SenderAddr, err)
+		}
+	}
 }
 
 func (n *Node) handleHeartbeat(msg *Message) {

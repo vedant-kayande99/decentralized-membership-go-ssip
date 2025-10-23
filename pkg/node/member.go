@@ -2,7 +2,9 @@ package node
 
 import (
 	"errors"
+	"fmt"
 	"log"
+	"maps"
 	"math/rand"
 	"sync"
 )
@@ -23,12 +25,25 @@ type Member struct {
 	HeartbeatCounter int
 }
 
+func (m Member) String() string {
+	return fmt.Sprintf("{Addr: %s, Status: %d, Heartbeat: %d}", m.Addr, m.Status, m.HeartbeatCounter)
+}
+
 type MemberList struct {
 	members map[string]*Member
 	mutex sync.RWMutex
 	selfAddr string
 	peers []string //members map keys list for O(1) random access
 	vectorClock map[string]int
+}
+
+func (ml *MemberList) PrintMemberList() {
+	ml.mutex.RLock()
+	defer ml.mutex.RUnlock()
+
+	for _, member := range ml.members {
+		log.Printf("%s", member.String())
+	}
 }
 
 func NewMemberList(selfAddr string) *MemberList {
@@ -43,6 +58,16 @@ func NewMemberList(selfAddr string) *MemberList {
 
 func self(selfAddr string) *Member {
 	return &Member{Addr: selfAddr, Status: Alive, HeartbeatCounter: 0}
+}
+
+func (ml *MemberList) GetVectorClock() map[string]int {
+	ml.mutex.RLock()
+	defer ml.mutex.RUnlock()
+
+	clockCopy := make(map[string]int, len(ml.vectorClock))
+	maps.Copy(clockCopy, ml.vectorClock)
+
+	return clockCopy
 }
 
 func (ml *MemberList) Add(member *Member) {
@@ -79,7 +104,8 @@ func (ml *MemberList) Remove(addr string) {
 }
 
 func (ml *MemberList) Merge(receivedMembers []Member) {
-	log.Printf("[INFO] Current Membership List of node %s: %v", ml.selfAddr, ml.members)
+	log.Printf("[INFO] Current Membership List of node %s", ml.selfAddr)
+	ml.PrintMemberList()
 	for _, member := range receivedMembers {
 		if member.Addr == ml.selfAddr {
 			continue
@@ -116,6 +142,23 @@ func (ml *MemberList) SyncMembers(receivedMembers []Member) {
 			ml.Remove(member.Addr)
 		}
 	}
+}
+
+func (ml *MemberList) GetDelta(remoteClock map[string]int) []Member {
+	ml.mutex.RLock()
+	defer ml.mutex.RUnlock()
+
+	var delta []Member
+	for addr, localVersion := range ml.vectorClock {
+		remoteVersion, ok := remoteClock[addr]
+		if !ok || remoteVersion < localVersion {
+			if member, exists := ml.members[addr]; exists {
+				delta = append(delta, *member)
+				log.Printf("[INFO] Delta member added: %s", member.String())
+			}
+		}
+	}
+	return delta
 }
 
 func (ml *MemberList) GetMembers() []Member {
