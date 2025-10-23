@@ -15,6 +15,7 @@ type Node struct {
 	memberList *MemberList
 	shutdown chan struct{}
 	wg sync.WaitGroup	
+	pingTable sync.Map
 }
 
 func NewNode(address string) (*Node, error) {
@@ -39,8 +40,8 @@ func NewNode(address string) (*Node, error) {
 func (n *Node) Start() {
 	n.wg.Add(2)
 	go n.listen()
-	// go n.heartBeatLoop()
 	go n.gossipLoop()
+	go n.failureDetectorLoop()
 	log.Printf("Node started at %s", n.addr)
 }
 
@@ -79,9 +80,9 @@ func (n *Node) listen() {
 	}
 }
 
-func (n *Node) heartBeatLoop() {
+func (n *Node) failureDetectorLoop() {
 	defer n.wg.Done()
-	ticker := time.NewTicker(1*time.Second)
+	ticker := time.NewTicker(2*time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -91,11 +92,30 @@ func (n *Node) heartBeatLoop() {
 			if err != nil {
 				continue
 			}
+			pingMsg := NewMessage(PingMsg, n.addr, nil, nil)
+			log.Printf("[DEBUG] Sending ping to %s", peer.Addr)
 
-			msg := NewMessage(HeartbeatMsg, n.addr, nil, nil)
-			if err := n.SendMessage(peer.Addr, msg); err != nil {
-				log.Printf("[ERROR] Failed to send heartbeat to %s: %v", peer.Addr, err)
+			respChan := make(chan struct{})
+			n.pingTable.Store(peer.Addr, respChan)
+
+			if err := n.SendMessage(peer.Addr, pingMsg); err != nil {
+				log.Printf("[ERROR] Failed to send ping to %s: %v", peer.Addr, err)
+				n.pingTable.Delete(peer.Addr)
+				continue
 			}
+
+			// go routine to wait for resp from peer node with timeout
+			go func(peerAddr string, ch chan struct{}) {
+				select {
+				case <-ch:
+					n.memberList.UpdateStatus(peerAddr, Alive)
+					log.Printf("[DEBUG] Received ack from %s", peerAddr)
+				case <-time.After(1*time.Second):
+					log.Printf("[WARN] Failed to receive ack within timeout from %s", peerAddr)
+					n.memberList.UpdateStatus(peerAddr, Suspect)
+				}
+			}(peer.Addr, respChan)
+
 		case <-n.shutdown:
 			return
 		}
@@ -104,7 +124,7 @@ func (n *Node) heartBeatLoop() {
 
 func (n *Node) gossipLoop() {
 	defer n.wg.Done()
-	ticker := time.NewTicker(5*time.Second)
+	ticker := time.NewTicker(10*time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -140,11 +160,13 @@ func (n *Node) handleMessage(msg *Message) {
 	case JoinMsg:
 		n.handleJoin(msg)
 	case JoinAckMsg:
-		n.handleJoinAck(msg)
-	case HeartbeatMsg:
-		n.handleHeartbeat(msg)
+		n.handleJoinAck(msg)	
 	case GossipMsg:
 		n.handleGossip(msg)
+	case PingMsg:
+		n.handlePing(msg)
+	case PingAckMsg:
+		n.handlePingAck(msg)
 	default:
 		log.Printf("[WARN] Unknown message type: %v", msg.Type)
 	}
@@ -210,8 +232,18 @@ func (n *Node) handleGossip(msg *Message) {
 	}
 }
 
-func (n *Node) handleHeartbeat(msg *Message) {
-	n.memberList.UpdateStatus(msg.SenderAddr, Alive)
+func (n *Node) handlePing(msg *Message) {
+	ackMsg := NewMessage(PingAckMsg, n.addr, nil, nil)
+	if err := n.SendMessage(msg.SenderAddr, ackMsg); err != nil {
+		log.Printf("[ERROR] Failed to send a ping ack to %s: %v", msg.SenderAddr, err)
+	}	
+}
+
+func (n *Node) handlePingAck(msg *Message) {
+	if ch, ok := n.pingTable.Load(msg.SenderAddr); ok {
+		respChan := ch.(chan struct{})
+		close(respChan)
+	}
 }
 
 func (n *Node) SendMessage(targetAddr string, message *Message) error {

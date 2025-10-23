@@ -123,6 +123,8 @@ func (ml *MemberList) Merge(receivedMembers []Member) {
 			}
 		}
 	}
+	log.Printf("[INFO] Updated Membership List of node %s", ml.selfAddr)
+	ml.PrintMemberList()
 }
 
 func (ml *MemberList) SyncMembers(receivedMembers []Member) {

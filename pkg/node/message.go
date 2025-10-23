@@ -9,9 +9,10 @@ type MessageType int
 
 const (
 	JoinMsg MessageType = iota
-	JoinAckMsg
-	HeartbeatMsg
+	JoinAckMsg	
 	GossipMsg
+	PingMsg
+	PingAckMsg
 )
 
 type Message struct {
