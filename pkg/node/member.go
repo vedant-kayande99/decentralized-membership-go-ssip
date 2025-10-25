@@ -19,6 +19,19 @@ const (
 	Dead
 )
 
+func (memStatus MemberStatus) String() string {
+	switch(memStatus) {
+	case Alive:
+		return "Alive"
+	case Suspect:
+		return "Suspect"
+	case Dead:
+		return "Dead"
+	default:
+		return "Unknown"
+	}
+}
+
 type Member struct {
 	Addr string
 	Status MemberStatus	
@@ -26,7 +39,7 @@ type Member struct {
 }
 
 func (m Member) String() string {
-	return fmt.Sprintf("{Addr: %s, Status: %d, Heartbeat: %d}", m.Addr, m.Status, m.HeartbeatCounter)
+	return fmt.Sprintf("{Addr: %s, Status: %s, Heartbeat: %d}", m.Addr, m.Status.String(), m.HeartbeatCounter)
 }
 
 type MemberList struct {
@@ -76,14 +89,27 @@ func (ml *MemberList) Add(member *Member) {
 
 	if _, exists := ml.members[member.Addr]; !exists {
 		ml.members[member.Addr] = member
-		if ml.selfAddr != member.Addr {
+		if ml.selfAddr != member.Addr && member.Status == Alive {
 			ml.peers = append(ml.peers, member.Addr)
 		}
 	} else {
 		ml.members[member.Addr].Status = member.Status		
 		ml.members[member.Addr].HeartbeatCounter = member.HeartbeatCounter
+
+		if member.Status == Suspect {
+			ml.removePeer(member.Addr)
+		}
 	}
 	ml.vectorClock[member.Addr] = member.HeartbeatCounter
+}
+
+func (ml *MemberList) removePeer(addr string) {
+	for i, peerAddr := range ml.peers {
+		if peerAddr == addr {
+			ml.peers = append(ml.peers[:i], ml.peers[i+1:]...)
+			break
+		}
+	}
 }
 
 func (ml *MemberList) Remove(addr string) {
@@ -194,7 +220,14 @@ func (ml *MemberList) UpdateStatus(addr string, status MemberStatus) {
 	defer ml.mutex.Unlock()
 
 	if member, exists := ml.members[addr]; exists {
-		member.Status = status		
+		oldStatus := member.Status
+		member.Status = status	
+		
+		if oldStatus == Alive && status == Suspect {
+			ml.removePeer(addr)
+		} else if oldStatus == Suspect && status == Alive {
+			ml.peers = append(ml.peers, addr)
+		}		
 	}
 }
 
@@ -206,4 +239,37 @@ func (ml *MemberList) IncrementHeartbeat() {
 		self.HeartbeatCounter += 1		
 		ml.vectorClock[ml.selfAddr] = self.HeartbeatCounter
 	}
+}
+
+func (ml *MemberList) GetRandomPeers(k int, excludeAddr string) ([]*Member, error) {
+	ml.mutex.RLock()
+	defer ml.mutex.RUnlock()
+
+	if len(ml.peers) == 0 {
+		return nil, ErrNoPeers
+	}
+
+	availablePeers := make([]string, 0, len(ml.peers))
+	for _, addr := range ml.peers {
+		if addr != excludeAddr {
+			availablePeers = append(availablePeers, addr)
+		}
+	}
+
+	if len(availablePeers) == 0 {
+		return nil, ErrNoPeers
+	}
+
+	count := min(k, len(availablePeers))
+
+	rand.Shuffle(len(availablePeers), func(i, j int) {
+		availablePeers[i], availablePeers[j] = availablePeers[j], availablePeers[i]
+	})
+
+	randomMembers := make([]*Member, count)
+	for i := range count {
+		randomMembers[i] = ml.members[availablePeers[i]]
+	}
+
+	return randomMembers, nil
 }

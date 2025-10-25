@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+const (
+	PingTimeout = 1 * time.Second
+	IndirectPingCount = 3
+	FailureCheckInterval = 2 * time.Second
+)
+
 type Node struct {
 	addr string
 	conn *net.UDPConn
@@ -82,7 +88,7 @@ func (n *Node) listen() {
 
 func (n *Node) failureDetectorLoop() {
 	defer n.wg.Done()
-	ticker := time.NewTicker(2*time.Second)
+	ticker := time.NewTicker(FailureCheckInterval)
 	defer ticker.Stop()
 
 	for {
@@ -110,16 +116,60 @@ func (n *Node) failureDetectorLoop() {
 				case <-ch:
 					n.memberList.UpdateStatus(peerAddr, Alive)
 					log.Printf("[DEBUG] Received ack from %s", peerAddr)
-				case <-time.After(1*time.Second):
-					log.Printf("[WARN] Failed to receive ack within timeout from %s", peerAddr)
-					n.memberList.UpdateStatus(peerAddr, Suspect)
+				case <-time.After(PingTimeout):
+					log.Printf("[WARN] No direct response from %s, starting indirect probing", peerAddr)					
+					n.startIndirectProbing(peerAddr)
 				}
+				n.pingTable.Delete(peerAddr)
 			}(peer.Addr, respChan)
 
 		case <-n.shutdown:
 			return
 		}
 	}
+}
+
+func (n *Node) startIndirectProbing(peerAddr string) {
+	peers, err := n.memberList.GetRandomPeers(IndirectPingCount, peerAddr)
+	if err != nil {
+		if err == ErrNoPeers {
+			// no other peers available for indirect probing, marking node as suspect
+			n.memberList.UpdateStatus(peerAddr, Suspect)
+			log.Printf("[WARN] No peers available for indirect probing marking %s as suspect", peerAddr)
+			return
+		}
+		log.Printf("[ERROR] Failed to get peers for indirect probing: %v", err)
+		return
+	}
+
+	indirectRespChan := make(chan struct{})
+	n.pingTable.Store(peerAddr+"_indirect", indirectRespChan)
+
+	for _, peer := range peers {
+		payload, err := json.Marshal(map[string]string{"target":peerAddr})
+		if err != nil {
+			log.Printf("[ERROR] Faied to create payload for PingReqMsg: %v", err)
+			continue
+		}
+		msg := NewMessage(PingReqMsg, n.addr, payload, nil)
+
+		if err := n.SendMessage(peer.Addr, msg); err != nil {
+			log.Printf("[ERROR] Failed to send PingReqMsg to %s: %v", peer.Addr, err)
+			continue
+		}
+	}
+
+	go func() {
+		select {
+		case <-indirectRespChan:
+			n.memberList.UpdateStatus(peerAddr, Alive)
+			log.Printf("[INFO] Node %s confirmed alive through indirect probing", peerAddr)
+		case <-time.After(PingTimeout):
+			n.memberList.UpdateStatus(peerAddr, Suspect)
+			log.Printf("[WARN] Node %s marked as suspect after failed indirect probing", peerAddr)
+		}
+		n.pingTable.Delete(peerAddr + "_indirect")
+	}()
 }
 
 func (n *Node) gossipLoop() {
@@ -160,13 +210,17 @@ func (n *Node) handleMessage(msg *Message) {
 	case JoinMsg:
 		n.handleJoin(msg)
 	case JoinAckMsg:
-		n.handleJoinAck(msg)	
+		n.handleJoinAck(msg)
 	case GossipMsg:
 		n.handleGossip(msg)
 	case PingMsg:
 		n.handlePing(msg)
 	case PingAckMsg:
 		n.handlePingAck(msg)
+	case PingReqMsg:
+		n.handlePingReq(msg)
+	case PingReqAckMsg:
+		n.handlePingReqAck(msg)
 	default:
 		log.Printf("[WARN] Unknown message type: %v", msg.Type)
 	}
@@ -241,6 +295,55 @@ func (n *Node) handlePing(msg *Message) {
 
 func (n *Node) handlePingAck(msg *Message) {
 	if ch, ok := n.pingTable.Load(msg.SenderAddr); ok {
+		respChan := ch.(chan struct{})
+		close(respChan)
+	}
+}
+
+func (n *Node) handlePingReq(msg *Message) {
+	var metadata map[string]string
+	if err := json.Unmarshal(msg.Payload, &metadata); err != nil {
+		log.Printf("[ERROR] Failed to deserialize message payload in PingReq message: %v", err)
+		return
+	}
+	targetAddr := metadata["target"]
+	pingMsg := NewMessage(PingMsg, n.addr, nil, nil)
+	if err := n.SendMessage(targetAddr, pingMsg); err != nil {
+		log.Printf("[ERROR] Failed to forward ping to %s: %v", targetAddr, err)
+		return
+	}
+
+	respChan := make(chan struct{})
+	n.pingTable.Store(targetAddr + "_ping_req", respChan)
+
+	go func() {
+		select {
+		case <-respChan:
+			// target responded, inform back to sender
+			payload, err := json.Marshal(map[string]string{"target":targetAddr})
+			if err != nil {
+				log.Printf("[ERROR] Faied to create payload for PingReqAckMsg: %v", err)
+				return				
+			}
+			ackMsg := NewMessage(PingReqAckMsg, n.addr, payload, nil)
+			n.SendMessage(msg.SenderAddr, ackMsg)
+		
+		case <-time.After(PingTimeout):
+			// no resp from target
+		}
+		n.pingTable.Delete(targetAddr + "_ping_req")
+	}()
+}
+
+func (n *Node) handlePingReqAck(msg *Message) {
+	var metadata map[string]string
+	if err := json.Unmarshal(msg.Payload, &metadata); err != nil {
+		log.Printf("[ERROR] Failed to deserialize message payload in PingReq message: %v", err)
+		return
+	}
+	targetAddr := metadata["target"]
+
+	if ch, ok := n.pingTable.Load(targetAddr + "_indirect"); ok {
 		respChan := ch.(chan struct{})
 		close(respChan)
 	}

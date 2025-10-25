@@ -13,7 +13,31 @@ const (
 	GossipMsg
 	PingMsg
 	PingAckMsg
+	PingReqMsg
+	PingReqAckMsg
 )
+
+func (msgTyp MessageType) String() string {
+	switch(msgTyp) {
+	case JoinMsg:
+		return "Join Request"
+	case JoinAckMsg:
+		return "Join Request Acknowledged"
+	case GossipMsg:
+		return "Gossip Message"
+	case PingMsg:
+		return "Ping Message"
+	case PingAckMsg:
+		return "Ping Acknowledged Message"
+	case PingReqMsg:
+		return "Ping Request Message"
+	case PingReqAckMsg:
+		return "Ping Request Acknowledged Message"
+	default:
+		return "Unknown Message Type"
+	}
+
+}
 
 type Message struct {
 	Type MessageType			`json:"type"`
