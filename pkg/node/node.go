@@ -44,7 +44,7 @@ func NewNode(address string) (*Node, error) {
 }
 
 func (n *Node) Start() {
-	n.wg.Add(2)
+	n.wg.Add(3)
 	go n.listen()
 	go n.gossipLoop()
 	go n.failureDetectorLoop()
@@ -65,7 +65,7 @@ func (n *Node) GetMemberList() *MemberList{
 func (n *Node) listen() {
 	defer n.wg.Done()
 	buffer := make([]byte, 1024)
-	for {
+	for {		
 		numBytes, _, err := n.conn.ReadFromUDP(buffer)
 		if err != nil {
 			select {
@@ -91,7 +91,7 @@ func (n *Node) failureDetectorLoop() {
 	ticker := time.NewTicker(FailureCheckInterval)
 	defer ticker.Stop()
 
-	for {
+	for {		
 		select {
 		case <-ticker.C:
 			peer, err := n.memberList.GetRandomPeer()
@@ -177,15 +177,15 @@ func (n *Node) gossipLoop() {
 	ticker := time.NewTicker(10*time.Second)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			n.memberList.IncrementHeartbeat()
+	for {		
+		select {		
+		case <-ticker.C:				
+			n.memberList.IncrementHeartbeat()						
 			peer, err := n.memberList.GetRandomPeer()
 			if err != nil {
 				continue
 			}
-
+			
 			members := n.memberList.GetMembers()
 			membersBytes, err := json.Marshal(members)
 			if err != nil {
@@ -196,9 +196,9 @@ func (n *Node) gossipLoop() {
 			msg := NewMessage(GossipMsg, n.addr, membersBytes, clock)
 			if err := n.SendMessage(peer.Addr, msg); err != nil {
 				log.Printf("[ERROR] Failed to send gossip message to %s from %s: %v", peer.Addr, n.addr, err)
-			}
+			}				
 		case <-n.shutdown:
-			return
+			return				
 		}
 	}
 }
@@ -230,6 +230,10 @@ func (n *Node) handleJoin(msg *Message) {
 	log.Printf("[INFO] Received Join request from %s", msg.SenderAddr)
 	// add the new node to the member list
 	member := &Member{Addr: msg.SenderAddr, Status: Alive, HeartbeatCounter: 0}
+	if existingMember, exists := n.memberList.GetMember(msg.SenderAddr); exists {
+		member.HeartbeatCounter = existingMember.HeartbeatCounter + 1
+	}
+	
 	n.memberList.Add(member)
 
 	// send back a JoinAck message with the complete updated member list
@@ -319,7 +323,7 @@ func (n *Node) handlePingReq(msg *Message) {
 	go func() {
 		select {
 		case <-respChan:
-			// target responded, inform back to sender
+			// target responded, inform back to sender			
 			payload, err := json.Marshal(map[string]string{"target":targetAddr})
 			if err != nil {
 				log.Printf("[ERROR] Faied to create payload for PingReqAckMsg: %v", err)

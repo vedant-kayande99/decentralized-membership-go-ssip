@@ -70,7 +70,7 @@ func NewMemberList(selfAddr string) *MemberList {
 }
 
 func self(selfAddr string) *Member {
-	return &Member{Addr: selfAddr, Status: Alive, HeartbeatCounter: 0}
+	return &Member{Addr: selfAddr, Status: Alive, HeartbeatCounter: 1}
 }
 
 func (ml *MemberList) GetVectorClock() map[string]int {
@@ -92,13 +92,9 @@ func (ml *MemberList) Add(member *Member) {
 		if ml.selfAddr != member.Addr && member.Status == Alive {
 			ml.peers = append(ml.peers, member.Addr)
 		}
-	} else {
-		ml.members[member.Addr].Status = member.Status		
+	} else {		
+		ml.updateMemberStatus(ml.members[member.Addr], member.Status)		
 		ml.members[member.Addr].HeartbeatCounter = member.HeartbeatCounter
-
-		if member.Status == Suspect {
-			ml.removePeer(member.Addr)
-		}
 	}
 	ml.vectorClock[member.Addr] = member.HeartbeatCounter
 }
@@ -189,6 +185,16 @@ func (ml *MemberList) GetDelta(remoteClock map[string]int) []Member {
 	return delta
 }
 
+func (ml *MemberList) GetMember(addr string) (Member, bool) {
+	ml.mutex.RLock()
+	defer ml.mutex.RUnlock()
+	mem, exists := ml.members[addr]
+	if !exists {
+		return Member{}, false
+	}
+	return *mem, true
+}
+
 func (ml *MemberList) GetMembers() []Member {
 	ml.mutex.RLock()
 	defer ml.mutex.RUnlock()
@@ -205,7 +211,7 @@ func (ml *MemberList) GetRandomPeer() (*Member, error) {
 	ml.mutex.RLock()
 	defer ml.mutex.RUnlock()
 
-	if len(ml.peers) == 0 {
+	if len(ml.peers) == 0 {		
 		return nil, ErrNoPeers
 	}
 
@@ -215,19 +221,23 @@ func (ml *MemberList) GetRandomPeer() (*Member, error) {
 	return ml.members[peerAddr], nil
 }
 
+func (ml *MemberList) updateMemberStatus(member *Member, status MemberStatus ) {
+	oldStatus := member.Status
+	member.Status = status
+
+	if oldStatus == Alive && status == Suspect {
+		ml.removePeer(member.Addr)
+	} else if oldStatus == Suspect && status == Alive {
+		ml.peers = append(ml.peers, member.Addr)
+	}
+}
+
 func (ml *MemberList) UpdateStatus(addr string, status MemberStatus) {
 	ml.mutex.Lock()
 	defer ml.mutex.Unlock()
 
 	if member, exists := ml.members[addr]; exists {
-		oldStatus := member.Status
-		member.Status = status	
-		
-		if oldStatus == Alive && status == Suspect {
-			ml.removePeer(addr)
-		} else if oldStatus == Suspect && status == Alive {
-			ml.peers = append(ml.peers, addr)
-		}		
+		ml.updateMemberStatus(member, status)
 	}
 }
 
