@@ -132,8 +132,7 @@ func (n *Node) failureDetectorLoop() {
 func (n *Node) startIndirectProbing(peerAddr string) {
 	peers, err := n.memberList.GetRandomPeers(IndirectPingCount, peerAddr)
 	if err != nil {
-		if err == ErrNoPeers {
-			// no other peers available for indirect probing, marking node as suspect
+		if err == ErrNoPeers {			
 			n.memberList.UpdateStatus(peerAddr, Suspect)
 			log.Printf("[WARN] No peers available for indirect probing marking %s as suspect", peerAddr)
 			return
@@ -159,9 +158,9 @@ func (n *Node) startIndirectProbing(peerAddr string) {
 		}
 	}
 
-	go func() {
+	go func(peerAddr string, ch chan struct{}) {
 		select {
-		case <-indirectRespChan:
+		case <-ch:
 			n.memberList.UpdateStatus(peerAddr, Alive)
 			log.Printf("[INFO] Node %s confirmed alive through indirect probing", peerAddr)
 		case <-time.After(PingTimeout):
@@ -169,7 +168,7 @@ func (n *Node) startIndirectProbing(peerAddr string) {
 			log.Printf("[WARN] Node %s marked as suspect after failed indirect probing", peerAddr)
 		}
 		n.pingTable.Delete(peerAddr + "_indirect")
-	}()
+	}(peerAddr, indirectRespChan)
 }
 
 func (n *Node) gossipLoop() {
@@ -290,18 +289,28 @@ func (n *Node) handleGossip(msg *Message) {
 	}
 }
 
-func (n *Node) handlePing(msg *Message) {
-	ackMsg := NewMessage(PingAckMsg, n.addr, nil, nil)
-	if err := n.SendMessage(msg.SenderAddr, ackMsg); err != nil {
-		log.Printf("[ERROR] Failed to send a ping ack to %s: %v", msg.SenderAddr, err)
-	}	
+func (n *Node) handlePing(msg *Message) {	
+		ackMsg := NewMessage(PingAckMsg, n.addr, msg.Payload, nil)
+		if err := n.SendMessage(msg.SenderAddr, ackMsg); err != nil {
+			log.Printf("[ERROR] Failed to send a ping ack to %s: %v", msg.SenderAddr, err)
+		}	
 }
 
 func (n *Node) handlePingAck(msg *Message) {
-	if ch, ok := n.pingTable.Load(msg.SenderAddr); ok {
+	// no payload: this is response to direct ping
+	if msg.Payload == nil {
+		if ch, ok := n.pingTable.Load(msg.SenderAddr); ok {
+			respChan := ch.(chan struct{})
+			close(respChan)
+		}
+		return
+	}
+
+	// payload with target addr: this is response to an indirect ping (ping_req)
+	if ch, ok := n.pingTable.Load(msg.SenderAddr + "_ping_req"); ok {
 		respChan := ch.(chan struct{})
 		close(respChan)
-	}
+	}	
 }
 
 func (n *Node) handlePingReq(msg *Message) {
@@ -310,19 +319,20 @@ func (n *Node) handlePingReq(msg *Message) {
 		log.Printf("[ERROR] Failed to deserialize message payload in PingReq message: %v", err)
 		return
 	}
-	targetAddr := metadata["target"]
-	pingMsg := NewMessage(PingMsg, n.addr, nil, nil)
-	if err := n.SendMessage(targetAddr, pingMsg); err != nil {
-		log.Printf("[ERROR] Failed to forward ping to %s: %v", targetAddr, err)
-		return
-	}
 
+	targetAddr := metadata["target"]
 	respChan := make(chan struct{})
 	n.pingTable.Store(targetAddr + "_ping_req", respChan)
 
-	go func() {
+	pingMsg := NewMessage(PingMsg, n.addr, msg.Payload, nil)
+	if err := n.SendMessage(targetAddr, pingMsg); err != nil {
+		log.Printf("[ERROR] Failed to forward ping to %s: %v", targetAddr, err)
+		return
+	}	
+
+	go func(targetAddr string, senderAddr string, ch chan struct{}) {
 		select {
-		case <-respChan:
+		case <-ch:
 			// target responded, inform back to sender			
 			payload, err := json.Marshal(map[string]string{"target":targetAddr})
 			if err != nil {
@@ -330,13 +340,13 @@ func (n *Node) handlePingReq(msg *Message) {
 				return				
 			}
 			ackMsg := NewMessage(PingReqAckMsg, n.addr, payload, nil)
-			n.SendMessage(msg.SenderAddr, ackMsg)
+			n.SendMessage(senderAddr, ackMsg)
 		
 		case <-time.After(PingTimeout):
-			// no resp from target
+			log.Printf("[DEBUG] PingReq timeout waiting for response from %s", targetAddr)			
 		}
 		n.pingTable.Delete(targetAddr + "_ping_req")
-	}()
+	}(targetAddr, msg.SenderAddr, respChan)
 }
 
 func (n *Node) handlePingReqAck(msg *Message) {
