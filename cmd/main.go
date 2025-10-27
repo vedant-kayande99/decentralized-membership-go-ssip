@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,7 +16,16 @@ import (
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "Address to listen on")
 	peer := flag.String("peer", "", "Address of peer to join cluster")
+	pprofAddr := flag.String("pprof", ":6060", "pprof http server address")
+
 	flag.Parse()
+
+	go func() {
+        log.Printf("Starting pprof server on %s", *pprofAddr)
+        if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+            log.Printf("pprof server failed: %v", err)
+        }
+    }()
 
 	n, err := node.NewNode(*addr)
 	if err != nil {
