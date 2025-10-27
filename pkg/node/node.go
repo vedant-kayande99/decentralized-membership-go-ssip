@@ -299,7 +299,7 @@ func (n *Node) handlePing(msg *Message) {
 func (n *Node) handlePingAck(msg *Message) {
 	// no payload: this is response to direct ping
 	if msg.Payload == nil {
-		if ch, ok := n.pingTable.Load(msg.SenderAddr); ok {
+		if ch, ok := n.pingTable.LoadAndDelete(msg.SenderAddr); ok {
 			respChan := ch.(chan struct{})
 			close(respChan)
 		}
@@ -307,7 +307,7 @@ func (n *Node) handlePingAck(msg *Message) {
 	}
 
 	// payload with target addr: this is response to an indirect ping (ping_req)
-	if ch, ok := n.pingTable.Load(msg.SenderAddr + "_ping_req"); ok {
+	if ch, ok := n.pingTable.LoadAndDelete(msg.SenderAddr + "_ping_req"); ok {
 		respChan := ch.(chan struct{})
 		close(respChan)
 	}	
@@ -357,7 +357,7 @@ func (n *Node) handlePingReqAck(msg *Message) {
 	}
 	targetAddr := metadata["target"]
 
-	if ch, ok := n.pingTable.Load(targetAddr + "_indirect"); ok {
+	if ch, ok := n.pingTable.LoadAndDelete(targetAddr + "_indirect"); ok {
 		respChan := ch.(chan struct{})
 		close(respChan)
 	}
