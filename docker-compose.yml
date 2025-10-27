@@ -2,15 +2,41 @@ services:
   node1:
     build: .
     command: -addr "node1:8080"
+    networks:
+      - shared_network
+    cap_add:
+      - NET_ADMIN
 
   node2:
     build: .
     command: -addr "node2:8080" -peer "node1:8080"
+    networks:
+      - shared_network
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - node1
 
   node3:
     build: .
     command: -addr "node3:8080" -peer "node1:8080"
+    networks:
+      - shared_network
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - node1
 
   node4:
     build: .
     command: -addr "node4:8080" -peer "node1:8080"
+    networks:
+      - shared_network
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - node1
+
+networks:
+  shared_network:
+    driver: bridge
