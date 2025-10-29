@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math/rand"
 	"sync"
+	"time"
 )
 
 var ErrNoPeers = errors.New("[ERROR] No peers in the member list")
@@ -36,6 +37,7 @@ type Member struct {
 	Addr string
 	Status MemberStatus	
 	HeartbeatCounter int
+	StatusChangeTime time.Time
 }
 
 func (m Member) String() string {
@@ -141,8 +143,13 @@ func (ml *MemberList) Merge(receivedMembers []Member) {
 			ml.Add(&member)
 		} else if exists && member.HeartbeatCounter == existingMem.HeartbeatCounter {
 			if member.Status > existingMem.Status {
-				ml.UpdateStatus(member.Addr, member.Status)
+				ml.UpdateStatus(member.Addr, member.Status)				
 			}
+		}
+
+		// no need to update the status change time for Suspect and Dead nodes
+		if member.Status == Suspect || member.Status == Dead {
+			ml.members[member.Addr].StatusChangeTime = member.StatusChangeTime
 		}
 	}
 	log.Printf("[INFO] Updated Membership List of node %s", ml.selfAddr)
@@ -224,6 +231,7 @@ func (ml *MemberList) GetRandomPeer() (*Member, error) {
 func (ml *MemberList) updateMemberStatus(member *Member, status MemberStatus ) {
 	oldStatus := member.Status
 	member.Status = status
+	member.StatusChangeTime = time.Now()
 
 	if oldStatus == Alive && status == Suspect {
 		ml.removePeer(member.Addr)
@@ -239,6 +247,15 @@ func (ml *MemberList) UpdateStatus(addr string, status MemberStatus) {
 	if member, exists := ml.members[addr]; exists {
 		ml.updateMemberStatus(member, status)
 	}
+}
+
+func (ml *MemberList) RemoveMember(addr string) {
+	ml.mutex.Lock()
+	defer ml.mutex.Unlock()
+	
+	ml.removePeer(addr)
+	delete(ml.members, addr)
+	delete(ml.vectorClock, addr)
 }
 
 func (ml *MemberList) IncrementHeartbeat() {

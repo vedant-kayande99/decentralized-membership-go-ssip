@@ -13,6 +13,9 @@ const (
 	PingTimeout = 1 * time.Second
 	IndirectPingCount = 3
 	FailureCheckInterval = 2 * time.Second
+	SuspectToDeadTimeout = 30*time.Second
+	DeadRemoveTimeout = time.Minute
+	GarbageCollectionInterval = 10*time.Second
 )
 
 type Node struct {
@@ -44,10 +47,11 @@ func NewNode(address string) (*Node, error) {
 }
 
 func (n *Node) Start() {
-	n.wg.Add(3)
+	n.wg.Add(4)
 	go n.listen()
 	go n.gossipLoop()
 	go n.failureDetectorLoop()
+	go n.garbageCollector()
 	log.Printf("Node started at %s", n.addr)
 }
 
@@ -56,10 +60,6 @@ func (n *Node) Stop() {
 	n.conn.Close()
 	n.wg.Wait()
 	log.Printf("Node %s stopped.", n.addr)		
-}
-
-func (n *Node) GetMemberList() *MemberList{
-	return n.memberList
 }
 
 func (n *Node) listen() {
@@ -198,6 +198,36 @@ func (n *Node) gossipLoop() {
 			}				
 		case <-n.shutdown:
 			return				
+		}
+	}
+}
+
+func (n *Node) garbageCollector() {
+	defer n.wg.Done()
+	ticker := time.NewTicker(GarbageCollectionInterval)
+	defer ticker.Stop()
+
+	for{
+		select {
+		case <-ticker.C:
+			members := n.memberList.GetMembers()
+			for _, member := range members {
+				if member.Addr == n.addr {
+					continue
+				}
+
+				if member.Status == Suspect && time.Since(member.StatusChangeTime) > SuspectToDeadTimeout {
+					log.Printf("[INFO] Marking node %s as dead (was suspect for too long)", member.Addr)
+					n.memberList.UpdateStatus(member.Addr, Dead)
+				}
+
+				if member.Status == Dead && time.Since(member.StatusChangeTime) > DeadRemoveTimeout {
+					log.Printf("[INFO] Removing node %s (was dead for too long)", member.Addr)
+					n.memberList.RemoveMember(member.Addr)
+				}
+			}
+		case <-n.shutdown:
+			return
 		}
 	}
 }
